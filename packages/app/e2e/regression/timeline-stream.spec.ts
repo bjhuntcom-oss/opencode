@@ -1000,6 +1000,125 @@ test("grows a streaming row without a ResizeObserver loop error", async ({ page 
   expect(await page.evaluate(() => document.documentElement.dataset.resizeObserverLoops)).toBeUndefined()
 })
 
+for (const input of ["Ctrl+Home", "PageUp on a control in a row", "the scrollbar"] as const) {
+  test(`keeps a reader who left the end with ${input} in place while the reply streams`, async ({ page }) => {
+    // Only the wheel, the scroll keys the timeline handles and a held pointer told it that the reader left the end.
+    // After any other scroll it went on following, and the next streamed line pulled the reader back to the end.
+    const timeline = await setupTimeline(page, {
+      messages: [
+        userMessage(),
+        assistantMessage(
+          [
+            textPart("prt_leave_earlier", notes("Earlier", 80)),
+            shell("prt_leave_shell", "completed", "ok"),
+            textPart("prt_leave_tail", "Streaming."),
+          ],
+          { completed: false },
+        ),
+      ],
+      settings: { shellToolPartsExpanded: false },
+    })
+
+    const scroller = page.locator(".scroll-view__viewport", { has: page.locator("[data-timeline-row]") })
+    const earlier = page.locator(`[data-timeline-part-id="${renderedPartID("prt_leave_earlier")}"]`)
+    const tail = page.locator(`[data-timeline-part-id="${renderedPartID("prt_leave_tail")}"]`)
+
+    const fromEnd = () =>
+      scroller.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)
+
+    const top = () => earlier.evaluate((element) => element.getBoundingClientRect().y)
+
+    await expect(tail).toBeInViewport()
+    // Before the rows have their real sizes the timeline has nowhere to scroll, and a key would do nothing.
+    await expect.poll(() => scroller.evaluate((element) => element.scrollTop)).toBeGreaterThan(100)
+    await expect.poll(fromEnd).toBeLessThanOrEqual(1)
+
+    // `press` focuses and presses in one action, so focus that the composer takes while it loads cannot come between.
+    if (input === "Ctrl+Home") await scroller.press("Control+Home")
+
+    if (input === "PageUp on a control in a row")
+      await page.locator('[data-timeline-part-ids="prt_leave_shell"] [data-slot="collapsible-trigger"]').press("PageUp")
+
+    if (input === "the scrollbar") {
+      await scroller.hover()
+      const thumb = await page.locator('[data-slot="session-timeline-visible"] .scroll-view__thumb').boundingBox()
+      await page.mouse.move(thumb!.x + thumb!.width / 2, thumb!.y + thumb!.height / 2)
+      await page.mouse.down()
+      await page.mouse.move(thumb!.x + thumb!.width / 2, thumb!.y + thumb!.height / 2 - 80, { steps: 4 })
+      await page.mouse.up()
+    }
+
+    await expect.poll(fromEnd).toBeGreaterThan(100)
+    // The reader's scroll has come to rest once the row holds its place from one read to the next. A `scrollend`
+    // can still belong to the pin that came before the reader's scroll.
+    const seen = { y: Number.NaN }
+
+    await expect
+      .poll(
+        async () => {
+          const y = await top()
+          const still = y === seen.y
+          seen.y = y
+
+          return still
+        },
+        { intervals: [200] },
+      )
+      .toBe(true)
+    const place = seen.y
+    const height = await scroller.evaluate((element) => element.scrollHeight)
+
+    await timeline.send(partDelta("prt_leave_tail", `\n\n${notes("Streamed", 12)}`))
+    // The streamed lines are measured, which is when a timeline that follows scrolls to its end.
+    await expect.poll(() => scroller.evaluate((element) => element.scrollHeight)).toBeGreaterThan(height)
+    expect(await top()).toBe(place)
+  })
+}
+
+test("goes on following the reply after a group collapses from its stuck header", async ({ page }) => {
+  // The group scrolls its header back into place before it collapses. At the end that scroll is not the reader
+  // leaving: the shorter content takes the view to the new end, where the reply still streams.
+  const timeline = await setupTimeline(page, {
+    settings: { timelineDetail: detailed },
+    messages: [
+      userMessage(),
+      assistantMessage(
+        [
+          // Enough that the timeline still scrolls once the group has collapsed.
+          textPart("prt_stuck_earlier", notes("Earlier", 40)),
+          ...searches(0, 60),
+          textPart("prt_stuck_tail", "Streaming."),
+        ],
+        { completed: false },
+      ),
+    ],
+  })
+
+  const scroller = page.locator(".scroll-view__viewport", { has: page.locator("[data-timeline-row]") })
+  const tail = page.locator(`[data-timeline-part-id="${renderedPartID("prt_stuck_tail")}"]`)
+
+  const group = page
+    .locator('[data-component="collapsed-tool-group"]')
+    .locator(':scope > [data-component="collapsible"] > [data-slot="collapsible-trigger"]')
+
+  const fromEnd = () => scroller.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)
+
+  await expect(tail).toBeInViewport()
+  await group.click()
+  await expect(group).toHaveAttribute("aria-expanded", "true")
+  // The open group outgrows the viewport, so at the end its header sticks to the top.
+  await expect.poll(() => scroller.evaluate((element) => element.scrollTop)).toBeGreaterThan(600)
+  await expect.poll(fromEnd).toBeLessThanOrEqual(1)
+  // A locator click first scrolls the header's own place in the group into view, which a reader's click does not.
+  const header = await group.boundingBox()
+  await page.mouse.click(header!.x + header!.width / 2, header!.y + header!.height / 2)
+  await expect(group).toHaveAttribute("aria-expanded", "false")
+
+  await timeline.send(partDelta("prt_stuck_tail", `\n\n${notes("Streamed", 40)}`))
+  await expect(page.getByText("Streamed note 40.", { exact: true })).toBeInViewport()
+  await expect.poll(fromEnd).toBeLessThanOrEqual(1)
+})
+
 test.describe("background work", () => {
   test("does not offer a running subagent to the background", async ({ page }) => {
     await setupTimeline(page, {
