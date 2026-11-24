@@ -184,6 +184,25 @@ test.each<{ name: string; events: FollowEvent[]; following: boolean }>([
     following: false,
   },
   {
+    // A link to the newest prompt ends at the end when its reply is short, and a size correction can move a view
+    // onto the end of a range that is not measured yet. Either counted as the reader's return to the end, so the
+    // timeline followed again and dropped the link.
+    name: "stays where navigation sent the view when a scroll that is not the reader's ends at the end",
+    events: [{ type: "detach" }, scroll(1000, 400, 1000, 1000, 0)],
+    following: false,
+  },
+  {
+    name: "stays where navigation sent the view when a scroll that is not the reader's ends at the zoomed end",
+    events: [{ type: "detach" }, scroll(997, 400, 1000, 1000, 0), { type: "scroll.settled", atReachableEnd: true }],
+    following: false,
+  },
+  {
+    // The scrollbar, autoscroll and a touch send no intent, only the movement.
+    name: "resumes when the reader's own scroll takes a view that navigation sent somewhere to the end",
+    events: [{ type: "detach" }, scroll(1000, 400)],
+    following: true,
+  },
+  {
     // At the end a wheel toward it scrolls nothing, so a reader the clamp left detached there had no way back.
     name: "resumes when a shrinking scroll range clamps a reader who scrolled away to the end",
     events: [

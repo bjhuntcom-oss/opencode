@@ -137,6 +137,8 @@ type Input = {
   /** Registers the reveal of a message's row, and the call that ends the scroll a reveal started. */
   setRevealMessage?: (fn: (id: string, partID?: string) => void, stop: () => void) => void
   setScrollToEnd?: (fn: (behavior?: ScrollBehavior) => void) => void
+  /** Registers the scroll that navigation asks for: the cursor's seek to a prompt, Find's scroll to a match. */
+  setScrollTo?: (fn: (top: number, behavior: ScrollBehavior) => void) => void
   /** Pages the timeline for keys pressed outside it, such as PageUp in the composer. */
   setPage?: (fn: (direction: 1 | -1) => void) => void
   reveal?: TimelineRouteReveal
@@ -289,9 +291,10 @@ export function createTimelineVirtualizer(input: Input) {
   )
   let scrollTop = 0
   // The offset and range the timeline last read, and how far the reader has moved the offset since the last scroll
-  // event. `lost`: the view left the document, which drops its offset, so the next read starts over. Measurements
-  // only: whether the reader left the end is the follow machine's to decide.
-  const seen = { top: 0, max: 0, reader: 0, lost: false }
+  // event. `lost`: the view left the document, which drops its offset, so the next read starts over. `bound`: where
+  // a smooth scroll that navigation asked for is going, or -1. Measurements only: whether the reader left the end is
+  // the follow machine's to decide.
+  const seen = { top: 0, max: 0, reader: 0, lost: false, bound: -1 }
 
   // Reused for every scroll: the transition only reads it, so a scroll allocates nothing.
   const scrollEvent = {
@@ -361,6 +364,8 @@ export function createTimelineVirtualizer(input: Input) {
             flushTouchAdjustment()
 
           if (scrolling) return
+          // A smooth scroll that has come to rest is over, wherever it stopped.
+          seen.bound = -1
 
           if (!isTouchHeld(input.follow.peek())) flushTouchAdjustment()
           input.follow.dispatch(
@@ -855,6 +860,21 @@ export function createTimelineVirtualizer(input: Input) {
       if (behavior === "smooth") return glide(root)
       virtualizer.scrollToEnd({ behavior })
     })
+    // The cursor and Find put their target in place with a scroll of their own. Made here, it is one of the
+    // timeline's writes, so the follow machine does not take a navigation that ends at the end for the reader's
+    // return to it.
+    input.setScrollTo?.((top, behavior) => {
+      const root = listRoot()
+
+      if (!active() || !root?.isConnected) return
+      readScroll(root)
+      root.scrollTo({ top, behavior })
+      syncScroll(root)
+      const bound = Math.min(Math.max(0, top), seen.max)
+
+      // A smooth scroll has only begun. The frames it takes to arrive are its own too.
+      if (behavior === "smooth" && Math.abs(bound - seen.top) > END_EPSILON) seen.bound = bound
+    })
     input.setPage?.((direction) => {
       const root = listRoot()
 
@@ -915,13 +935,26 @@ export function createTimelineVirtualizer(input: Input) {
     // A scroll range that shrinks takes a view at its end up with it: the browser's clamp, not the reader.
     const clamped = top < seen.top && max < seen.max && max - top <= ZOOM_SLACK
 
-    if (!clamped) seen.reader += top - seen.top
+    // A smooth scroll that navigation asked for arrives over many frames. Movement toward where it is bound, and not
+    // past it, is that scroll. Any other movement is the reader's, who has the scroll from then on.
+    const onCourse =
+      seen.bound >= 0 &&
+      (top - seen.top) * (seen.bound - seen.top) > 0 &&
+      Math.abs(top - seen.top) <= Math.abs(seen.bound - seen.top)
+
+    if (top !== seen.top && (!onCourse || Math.abs(seen.bound - top) <= END_EPSILON)) seen.bound = -1
+
+    if (!clamped && !onCourse) seen.reader += top - seen.top
     seen.top = top
     seen.max = max
   }
 
-  /** Takes the offset and range as they are now, after a write of the timeline's own or a reset by the browser. */
+  /**
+   * Takes the offset and range as they are now, after a write of the timeline's own or a reset by the browser. Either
+   * ends a smooth scroll that was on its way.
+   */
   function syncScroll(root: HTMLDivElement) {
+    seen.bound = -1
     seen.lost = !root.isConnected
     seen.max = root.scrollHeight - root.clientHeight
     seen.top = Math.min(Math.max(0, root.scrollTop), seen.max)
@@ -1134,6 +1167,8 @@ export function createTimelineVirtualizer(input: Input) {
   // Only an upward intent reads the scroll range, as content that does not overflow cannot move.
   function dispatchIntent(upward: boolean) {
     const root = listRoot()
+    // The reader's wheel or key takes the scroll from a smooth one that navigation asked for.
+    seen.bound = -1
     intentEvent.upward = upward
     intentEvent.overflow = upward && !!root && root.scrollHeight - root.clientHeight > MIN_OVERFLOW
     input.follow.dispatch(intentEvent)
@@ -1168,6 +1203,8 @@ export function createTimelineVirtualizer(input: Input) {
     const root = listRoot()
     const nested = event.target instanceof Element ? event.target.closest<HTMLElement>("[data-scrollable]") : null
 
+    // A finger on the timeline takes the scroll from a smooth one that navigation asked for.
+    seen.bound = -1
     input.follow.dispatch(
       nested && nested !== root && nested.scrollHeight > nested.clientHeight ? nestedTouchStartEvent : touchStartEvent,
     )
@@ -1513,6 +1550,7 @@ export function createTimelineVirtualizer(input: Input) {
         () => {},
       )
       input.setScrollToEnd?.(() => {})
+      input.setScrollTo?.(() => {})
       input.setPage?.(() => {})
     }
   })

@@ -274,12 +274,17 @@ function releaseAnchor(state: FollowState, event: FollowEvent): FollowState {
 // was already there. Merely resting near the end is not enough, otherwise a later scroll would overwrite an upward
 // intent expressed a pixel short of the bottom.
 function scrolled(state: Unanchored, event: Extract<FollowEvent, { type: "scroll" }>): FollowState {
-  // A scroll range that shrinks to where the view is lowers the offset by itself: the browser clamps it to the new
-  // end. A view that navigation sent somewhere has not arrived at the end that way. Its target is where it stays.
-  const shrank = event.maxScroll < event.previousMaxScroll && !(state.type === "detached" && state.by === "navigation")
   const movedDown = event.scrollTop > event.previousTop + END_EPSILON
-  const arrived = movedDown || shrank
   const movedUp = event.scrollTop < event.previousTop - END_EPSILON
+
+  // A view that navigation sent somewhere stays at its target until the reader scrolls it to the end. Nothing else
+  // that ends there is an arrival: not the navigation's own scroll, which stops at the end when the target is the
+  // newest prompt with a short reply, not a correction for rows that measure, and not a scroll range that shrinks to
+  // where the view is, where the browser lowers the offset to the new end by itself.
+  const arrived =
+    state.type === "detached" && state.by === "navigation"
+      ? event.reader > END_EPSILON
+      : movedDown || event.maxScroll < event.previousMaxScroll
 
   const atEnd =
     (event.maxScroll <= MIN_OVERFLOW && event.previousMaxScroll > MIN_OVERFLOW) ||
